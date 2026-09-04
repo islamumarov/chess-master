@@ -2,14 +2,18 @@ class_name BoardView
 extends Control
 ## Visual chessboard. Draws squares, coordinates and highlights in _draw(),
 ## hosts one TextureRect per piece (tweened when a move is played) and turns
-## clicks into `square_clicked` signals.
+## clicks and drags into `square_clicked` / `drag_dropped` signals.
 ##
-## Holds no rules: the controller decides what a click means and pushes the
-## highlight state (selection, legal targets, last move, check) back in.
+## Holds no rules: the controller decides what a click or a drop means and
+## pushes the highlight state (selection, legal targets, last move, check) back in.
 
 signal square_clicked(sq: int)
 signal square_right_clicked
 signal animation_finished
+## A press on a piece of the side to move turned into a drag.
+signal drag_started(sq: int)
+## A drag was released over another square; the controller decides legality.
+signal drag_dropped(from: int, to: int)
 
 const LIGHT_SQUARE := Color("d9c7a7")
 const DARK_SQUARE := Color("7a5c44")
@@ -25,6 +29,8 @@ const HOVER_COLOR := Color(1, 1, 1, 0.14)
 const FRAME_WIDTH := 4.0
 const MOVE_ANIM_TIME := 0.2
 const CAPTURE_FADE_TIME := 0.07
+const DRAG_START_DISTANCE := 6.0  ## Pixels the mouse must travel before a press becomes a drag.
+const DRAG_SNAP_BACK_TIME := 0.12  ## Time the sprite takes to slide home after a dropped drag.
 const LIFT_SCALE := 1.07
 const LIFT_UP_FRACTION := 0.35  ## Portion of the move spent scaling up before easing back down.
 const PROMOTION_SWAP_FRACTION := 0.9  ## Progress at which the pawn sprite swaps to the promoted piece.
@@ -37,10 +43,12 @@ var flipped := false:
 		queue_redraw()
 		_layout_pieces()
 
-## Accept clicks (false while the AI thinks or the game is over).
+## Accept clicks and drags (false while the AI thinks or the game is over).
 var interactive := true:
 	set(value):
 		interactive = value
+		if not value:
+			_cancel_drag()
 		queue_redraw()
 
 var _position: ChessPosition
@@ -55,6 +63,12 @@ var _pulse := 0.0
 var _piece_nodes := {}  # square -> TextureRect
 var _ghosts: Array[TextureRect] = []  # fading captured pieces
 var _tween: Tween
+var _press_sq := -1        # square the left button went down on, -1 when not pressed
+var _press_point := Vector2.ZERO
+var _press_can_drag := false
+var _drag_from := -1       # square the dragged piece came from, -1 when not dragging
+var _drag_node: TextureRect
+var _drag_tween: Tween     # snap-back of a released drag
 
 
 func _ready() -> void:
@@ -210,6 +224,12 @@ func _draw_coordinates(ss: float) -> void:
 func _is_hoverable(sq: int) -> bool:
 	if _legal_targets.has(sq):
 		return true
+	return _is_own_piece(sq)
+
+
+## True when the square holds a piece of the side to move, the only kind that
+## can be picked up. Whether the move it lands on is legal is the controller's call.
+func _is_own_piece(sq: int) -> bool:
 	return _position != null and _position.board[sq] * _position.side_to_move > 0
 
 
@@ -225,13 +245,21 @@ func _gui_input(event: InputEvent) -> void:
 			queue_redraw()
 		var pointing := interactive and sq >= 0 and _is_hoverable(sq)
 		mouse_default_cursor_shape = CURSOR_POINTING_HAND if pointing else CURSOR_ARROW
-	elif event is InputEventMouseButton and event.pressed:
+		if _drag_from >= 0:
+			_drag_to_point(event.position)
+		elif _press_can_drag and event.position.distance_to(_press_point) > DRAG_START_DISTANCE:
+			_begin_drag(event.position)
+	elif event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			var sq := square_at(event.position)
-			if sq >= 0 and interactive:
-				square_clicked.emit(sq)
+			if event.pressed:
+				_press_sq = square_at(event.position) if interactive else -1
+				_press_point = event.position
+				_press_can_drag = _press_sq >= 0 and _is_own_piece(_press_sq)
+			else:
+				_release(event.position)
 			accept_event()
-		elif event.button_index == MOUSE_BUTTON_RIGHT:
+		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+			_cancel_drag()
 			square_right_clicked.emit()
 			accept_event()
 
@@ -243,6 +271,68 @@ func _notification(what: int) -> void:
 
 
 # ---------------------------------------------------------------------------
+# Dragging
+# ---------------------------------------------------------------------------
+
+## Picks the pressed piece up: it leaves its square, follows the cursor above
+## the other pieces, and the controller highlights it like a click-selection.
+func _begin_drag(point: Vector2) -> void:
+	var node: TextureRect = _piece_nodes.get(_press_sq)
+	if node == null:
+		return
+	if _drag_tween != null and _drag_tween.is_valid():
+		_drag_tween.kill()
+	_drag_from = _press_sq
+	_drag_node = node
+	node.pivot_offset = node.size * 0.5
+	move_child(node, -1)  # drag above the other pieces
+	drag_started.emit(_drag_from)
+	_drag_to_point(point)
+
+
+func _drag_to_point(point: Vector2) -> void:
+	_drag_node.position = point - _drag_node.size * 0.5
+
+
+## A drag or a click ends here: a drop over another square goes to the
+## controller, a press that never moved off its square stays a plain click.
+func _release(point: Vector2) -> void:
+	var sq := square_at(point)
+	var from := _drag_from
+	if from >= 0:
+		_drop_drag()
+		if sq >= 0 and sq != from:
+			drag_dropped.emit(from, sq)
+	elif interactive and _press_sq >= 0 and sq == _press_sq:
+		square_clicked.emit(sq)
+	_press_sq = -1
+	_press_can_drag = false
+
+
+## Ends the drag and slides the sprite home. A legal drop rebuilds the sprites
+## through animate_move() in the same frame, so the snap-back is only seen when
+## the move was refused or the piece was let go off the board.
+func _drop_drag() -> void:
+	var node := _drag_node
+	var from := _drag_from
+	_drag_node = null
+	_drag_from = -1
+	if node == null:
+		return
+	_drag_tween = create_tween()
+	_drag_tween.tween_property(node, "position", square_rect(from).position, DRAG_SNAP_BACK_TIME) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+
+## Drops the piece back without telling the controller (right-click, AI's turn).
+func _cancel_drag() -> void:
+	_press_sq = -1
+	_press_can_drag = false
+	if _drag_from >= 0:
+		_drop_drag()
+
+
+# ---------------------------------------------------------------------------
 # Pieces
 # ---------------------------------------------------------------------------
 
@@ -251,6 +341,13 @@ func rebuild_pieces() -> void:
 	if _tween != null and _tween.is_valid():
 		_tween.kill()
 	_tween = null
+	if _drag_tween != null and _drag_tween.is_valid():
+		_drag_tween.kill()
+	_drag_tween = null
+	_drag_node = null  # freed below with the rest of the sprites
+	_drag_from = -1
+	_press_sq = -1
+	_press_can_drag = false
 	for node in _piece_nodes.values():
 		node.queue_free()
 	_piece_nodes.clear()
@@ -340,4 +437,5 @@ func _place(node: TextureRect, sq: int) -> void:
 
 func _layout_pieces() -> void:
 	for sq in _piece_nodes:
-		_place(_piece_nodes[sq], sq)
+		if _piece_nodes[sq] != _drag_node:  # a held piece stays under the cursor
+			_place(_piece_nodes[sq], sq)

@@ -8,6 +8,7 @@ Open the folder in Godot and press **Play** (`scenes/main.tscn` is the main scen
 ## Playing
 
 - **Click** a piece, then click a highlighted square. Green dot = move, red ring = capture.
+- Or **drag** a piece onto its target square; dropping anywhere else puts it back.
 - Gold = selected piece, blue = last move, pulsing red = king in check.
 - Pawn reaching the last rank opens a promotion picker (click outside to cancel).
 - Side panel: captured pieces, move list (SAN), **New Game**, **Undo** (takes back your

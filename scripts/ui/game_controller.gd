@@ -44,6 +44,8 @@ var _thinking_dots := 0
 func _ready() -> void:
 	board.square_clicked.connect(_on_square_clicked)
 	board.square_right_clicked.connect(_clear_selection)
+	board.drag_started.connect(_on_drag_started)
+	board.drag_dropped.connect(_on_drag_dropped)
 	promotion_dialog.piece_chosen.connect(_on_promotion_chosen)
 	promotion_dialog.cancelled.connect(_clear_selection)
 	panel.new_game_requested.connect(new_game)
@@ -269,25 +271,56 @@ func _show_game_over(title: String, subtitle: String) -> void:
 # ---------------------------------------------------------------------------
 
 func _on_square_clicked(sq: int) -> void:
-	if game_over or _ai_thinking or pos.side_to_move != human_color or board.is_animating():
+	if not _accepts_input():
 		return
-	if _selected_sq >= 0 and sq != _selected_sq:
-		var candidates := PackedInt32Array()
-		for m in _legal_moves:
-			if ChessMove.from_sq(m) == _selected_sq and ChessMove.to_sq(m) == sq:
-				candidates.push_back(m)
-		if candidates.size() == 1:
-			_play_move(candidates[0])
-			return
-		if candidates.size() > 1:  # four promotion choices
-			_pending_promotion = candidates
-			promotion_dialog.open(human_color)
-			return
+	if _selected_sq >= 0 and sq != _selected_sq and _try_move(_selected_sq, sq):
+		return
 	var piece := pos.board[sq]
 	if piece != 0 and signi(piece) == pos.side_to_move:
 		_select(sq)
 	else:
 		_clear_selection()
+
+
+## The view picked a piece up: highlight it exactly as a click-selection does.
+func _on_drag_started(sq: int) -> void:
+	if not _accepts_input():
+		return
+	var piece := pos.board[sq]
+	if piece != 0 and signi(piece) == pos.side_to_move:
+		_select(sq)
+
+
+## The view dropped a piece on another square; the move goes through the same
+## path as a click, and a refused drop simply drops the selection.
+func _on_drag_dropped(from: int, to: int) -> void:
+	if not _accepts_input():
+		return
+	if not _try_move(from, to):
+		_clear_selection()
+
+
+## True while the human may select and move: no AI search, animation or game over.
+func _accepts_input() -> bool:
+	return not game_over and not _ai_thinking and pos.side_to_move == human_color \
+			and not board.is_animating()
+
+
+## Plays the from→to move, or opens the promotion picker when the two squares
+## are shared by several promotion choices. False when no legal move matches.
+func _try_move(from: int, to: int) -> bool:
+	var candidates := PackedInt32Array()
+	for m in _legal_moves:
+		if ChessMove.from_sq(m) == from and ChessMove.to_sq(m) == to:
+			candidates.push_back(m)
+	if candidates.is_empty():
+		return false
+	if candidates.size() == 1:
+		_play_move(candidates[0])
+	else:  # four promotion choices
+		_pending_promotion = candidates
+		promotion_dialog.open(human_color)
+	return true
 
 
 func _select(sq: int) -> void:
