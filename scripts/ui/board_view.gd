@@ -28,7 +28,18 @@ const CHECK_COLOR := Color(0.95, 0.15, 0.1)
 const HOVER_COLOR := Color(1, 1, 1, 0.14)
 const FRAME_WIDTH := 4.0
 const MOVE_ANIM_TIME := 0.2
-const CAPTURE_FADE_TIME := 0.07
+const CAPTURE_DESTROY_TIME := 0.3  ## Length of the burst that destroys a captured piece.
+const CAPTURE_DESTROY_LEAD := 0.07  ## How long before the mover lands the burst starts.
+const CAPTURE_GHOST_SCALE := 1.35  ## Size the captured sprite swells to while it fades.
+const FRAGMENT_COUNT := 12
+const FRAGMENT_SIZE_FRACTION := 0.09  ## Fragment side, as a fraction of a square.
+const FRAGMENT_START_FRACTION := 0.1  ## Radius the fragments start out from the square centre.
+const FRAGMENT_SPREAD_FRACTION := 0.6  ## Distance the fragments fly, in squares.
+const FRAGMENT_SPREAD_JITTER := 0.45  ## Fraction of that distance that is randomised away.
+const FRAGMENT_END_SCALE := 0.3
+const FRAGMENT_SPIN := 1.2  ## Radians a fragment turns over the burst.
+const FRAGMENT_WHITE := Color("f4ecdc")  ## Piece fills, so the shards match the captured side.
+const FRAGMENT_BLACK := Color("2b2624")
 const DRAG_START_DISTANCE := 6.0  ## Pixels the mouse must travel before a press becomes a drag.
 const DRAG_SNAP_BACK_TIME := 0.12  ## Time the sprite takes to slide home after a dropped drag.
 const LIFT_SCALE := 1.07
@@ -61,7 +72,8 @@ var _check_sq := -1
 var _hover_sq := -1
 var _pulse := 0.0
 var _piece_nodes := {}  # square -> TextureRect
-var _ghosts: Array[TextureRect] = []  # fading captured pieces
+var _fx_nodes: Array[Control] = []  # ghost and fragments of the piece being destroyed
+var _fx_tween: Tween  # capture burst, deliberately independent of _tween
 var _tween: Tween
 var _press_sq := -1        # square the left button went down on, -1 when not pressed
 var _press_point := Vector2.ZERO
@@ -336,7 +348,9 @@ func _cancel_drag() -> void:
 # Pieces
 # ---------------------------------------------------------------------------
 
-## Recreates piece sprites from the bound position. Finishes any running animation.
+## Recreates piece sprites from the bound position. Finishes any running move
+## animation; a capture burst owns its own nodes and tween, so it plays on and
+## cleans itself up instead of being cut off half way.
 func rebuild_pieces() -> void:
 	if _tween != null and _tween.is_valid():
 		_tween.kill()
@@ -351,9 +365,6 @@ func rebuild_pieces() -> void:
 	for node in _piece_nodes.values():
 		node.queue_free()
 	_piece_nodes.clear()
-	for ghost in _ghosts:
-		ghost.queue_free()
-	_ghosts.clear()
 	if _position == null:
 		return
 	for sq in 64:
@@ -364,7 +375,7 @@ func rebuild_pieces() -> void:
 
 ## Animates a move that has ALREADY been made on the position: sprites are
 ## rebuilt for the new position, then the moved piece (and castling rook) slide
-## in from their old squares while a ghost of the captured piece fades out.
+## in from their old squares while the captured piece is destroyed on its square.
 ## `promo_pawn_piece` is the signed pawn code the mover used to be, when the
 ## move promoted it; the sprite shows the pawn sliding, then swaps to the
 ## already-promoted piece shortly before it lands.
@@ -377,12 +388,7 @@ func animate_move(from: int, to: int, captured_piece: int = 0, captured_sq: int 
 		return
 	_tween = create_tween().set_parallel(true)
 	if captured_piece != 0 and captured_sq >= 0:
-		var ghost := _make_piece(captured_piece, captured_sq)
-		_ghosts.append(ghost)
-		ghost.pivot_offset = ghost.size * 0.5
-		var fade_delay := MOVE_ANIM_TIME - CAPTURE_FADE_TIME
-		_tween.tween_property(ghost, "modulate:a", 0.0, CAPTURE_FADE_TIME).set_delay(fade_delay)
-		_tween.tween_property(ghost, "scale", Vector2(0.6, 0.6), CAPTURE_FADE_TIME).set_delay(fade_delay)
+		_start_capture_effect(captured_piece, captured_sq, MOVE_ANIM_TIME - CAPTURE_DESTROY_LEAD)
 	_place(mover, from)
 	move_child(mover, -1)  # slide above the other pieces
 	mover.pivot_offset = mover.size * 0.5
@@ -408,9 +414,6 @@ func animate_move(from: int, to: int, captured_piece: int = 0, captured_sq: int 
 
 
 func _on_animation_finished() -> void:
-	for ghost in _ghosts:
-		ghost.queue_free()
-	_ghosts.clear()
 	for node in _piece_nodes.values():
 		node.scale = Vector2.ONE
 	_layout_pieces()  # snap positions exactly; undoes any float drift from the tween
@@ -439,3 +442,75 @@ func _layout_pieces() -> void:
 	for sq in _piece_nodes:
 		if _piece_nodes[sq] != _drag_node:  # a held piece stays under the cursor
 			_place(_piece_nodes[sq], sq)
+
+
+# ---------------------------------------------------------------------------
+# Capture effect
+# ---------------------------------------------------------------------------
+
+## Destroys a captured piece on its square: a ghost of it swells while fading
+## out and a burst of fragments in its colour scatters away, `delay` seconds
+## after the move animation starts (so it fires as the capturer lands).
+##
+## The burst runs on its own tween and node list, which is why it survives a
+## rebuild_pieces() half way through instead of leaving tweens pointing at freed
+## sprites; it frees its nodes when it ends, or when the next capture starts.
+## Call this before raising the mover, so the mover keeps drawing above it.
+func _start_capture_effect(piece: int, sq: int, delay: float) -> void:
+	_clear_capture_effect()
+	var center := square_rect(sq).get_center()
+	var ss := square_size()
+	_fx_tween = create_tween().set_parallel(true)
+
+	var ghost := _make_piece(piece, sq)
+	_fx_nodes.append(ghost)
+	ghost.pivot_offset = ghost.size * 0.5
+	_fx_tween.tween_property(ghost, "scale", Vector2(CAPTURE_GHOST_SCALE, CAPTURE_GHOST_SCALE), CAPTURE_DESTROY_TIME) \
+			.set_delay(delay).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_fx_tween.tween_property(ghost, "modulate:a", 0.0, CAPTURE_DESTROY_TIME) \
+			.set_delay(delay).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+
+	var frag_size := Vector2.ONE * ss * FRAGMENT_SIZE_FRACTION
+	var color := FRAGMENT_WHITE if piece > 0 else FRAGMENT_BLACK
+	for i in FRAGMENT_COUNT:
+		# One fragment per equal slice of the circle, jittered so the ring of
+		# shards does not read as a regular pattern.
+		var direction := Vector2.from_angle(TAU * (float(i) + randf()) / float(FRAGMENT_COUNT))
+		var start := center + direction * ss * FRAGMENT_START_FRACTION - frag_size * 0.5
+		var travel := ss * FRAGMENT_SPREAD_FRACTION * randf_range(1.0 - FRAGMENT_SPREAD_JITTER, 1.0)
+		var frag := _make_fragment(color, frag_size, start)
+		_fx_nodes.append(frag)
+		_fx_tween.tween_callback(frag.show).set_delay(delay)
+		_fx_tween.tween_property(frag, "position", start + direction * travel, CAPTURE_DESTROY_TIME) \
+				.set_delay(delay).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_fx_tween.tween_property(frag, "rotation", frag.rotation + randf_range(-FRAGMENT_SPIN, FRAGMENT_SPIN), CAPTURE_DESTROY_TIME) \
+				.set_delay(delay)
+		_fx_tween.tween_property(frag, "scale", Vector2(FRAGMENT_END_SCALE, FRAGMENT_END_SCALE), CAPTURE_DESTROY_TIME) \
+				.set_delay(delay).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+		_fx_tween.tween_property(frag, "modulate:a", 0.0, CAPTURE_DESTROY_TIME) \
+				.set_delay(delay).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	_fx_tween.finished.connect(_clear_capture_effect)
+
+
+## Hidden until the burst starts, so it does not sit on the square while the
+## capturing piece is still on its way.
+func _make_fragment(color: Color, frag_size: Vector2, pos: Vector2) -> ColorRect:
+	var frag := ColorRect.new()
+	frag.color = color
+	frag.size = frag_size
+	frag.position = pos
+	frag.pivot_offset = frag_size * 0.5
+	frag.rotation = randf() * TAU
+	frag.mouse_filter = MOUSE_FILTER_IGNORE
+	frag.hide()
+	add_child(frag)
+	return frag
+
+
+func _clear_capture_effect() -> void:
+	if _fx_tween != null and _fx_tween.is_valid():
+		_fx_tween.kill()
+	_fx_tween = null
+	for node in _fx_nodes:
+		node.queue_free()
+	_fx_nodes.clear()

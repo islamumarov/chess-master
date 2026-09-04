@@ -5,4 +5,4 @@ first unchecked item, implements it, verifies, marks it done here and commits
 to `main`. Add new items at the bottom.
 
 - [x] Drag and drop for pieces (click-to-move must keep working)
-- [ ] Destroy animation for captured pieces (replace the plain fade)
+- [x] Destroy animation for captured pieces (replace the plain fade)
