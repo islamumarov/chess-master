@@ -24,7 +24,10 @@ const CHECK_COLOR := Color(0.95, 0.15, 0.1)
 const HOVER_COLOR := Color(1, 1, 1, 0.14)
 const FRAME_WIDTH := 4.0
 const MOVE_ANIM_TIME := 0.2
-const CAPTURE_FADE_TIME := 0.15
+const CAPTURE_FADE_TIME := 0.07
+const LIFT_SCALE := 1.07
+const LIFT_UP_FRACTION := 0.35  ## Portion of the move spent scaling up before easing back down.
+const PROMOTION_SWAP_FRACTION := 0.9  ## Progress at which the pawn sprite swaps to the promoted piece.
 const CHECK_PULSE_SPEED := 5.0
 
 ## Show the board from Black's side.
@@ -265,8 +268,11 @@ func rebuild_pieces() -> void:
 ## Animates a move that has ALREADY been made on the position: sprites are
 ## rebuilt for the new position, then the moved piece (and castling rook) slide
 ## in from their old squares while a ghost of the captured piece fades out.
+## `promo_pawn_piece` is the signed pawn code the mover used to be, when the
+## move promoted it; the sprite shows the pawn sliding, then swaps to the
+## already-promoted piece shortly before it lands.
 func animate_move(from: int, to: int, captured_piece: int = 0, captured_sq: int = -1,
-		rook_from: int = -1, rook_to: int = -1) -> void:
+		rook_from: int = -1, rook_to: int = -1, promo_pawn_piece: int = 0) -> void:
 	rebuild_pieces()
 	var mover: TextureRect = _piece_nodes.get(to)
 	if mover == null:
@@ -276,17 +282,31 @@ func animate_move(from: int, to: int, captured_piece: int = 0, captured_sq: int 
 	if captured_piece != 0 and captured_sq >= 0:
 		var ghost := _make_piece(captured_piece, captured_sq)
 		_ghosts.append(ghost)
-		_tween.tween_property(ghost, "modulate:a", 0.0, CAPTURE_FADE_TIME)
+		ghost.pivot_offset = ghost.size * 0.5
+		var fade_delay := MOVE_ANIM_TIME - CAPTURE_FADE_TIME
+		_tween.tween_property(ghost, "modulate:a", 0.0, CAPTURE_FADE_TIME).set_delay(fade_delay)
+		_tween.tween_property(ghost, "scale", Vector2(0.6, 0.6), CAPTURE_FADE_TIME).set_delay(fade_delay)
 	_place(mover, from)
 	move_child(mover, -1)  # slide above the other pieces
+	mover.pivot_offset = mover.size * 0.5
+	if promo_pawn_piece != 0:
+		var promoted_texture := mover.texture
+		mover.texture = PieceTextures.get_texture(promo_pawn_piece)
+		_tween.tween_callback(func(): mover.texture = promoted_texture) \
+				.set_delay(MOVE_ANIM_TIME * PROMOTION_SWAP_FRACTION)
 	_tween.tween_property(mover, "position", square_rect(to).position, MOVE_ANIM_TIME) \
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_tween.tween_property(mover, "scale", Vector2(LIFT_SCALE, LIFT_SCALE), MOVE_ANIM_TIME * LIFT_UP_FRACTION) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_tween.tween_property(mover, "scale", Vector2.ONE, MOVE_ANIM_TIME * (1.0 - LIFT_UP_FRACTION)) \
+			.set_delay(MOVE_ANIM_TIME * LIFT_UP_FRACTION) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
 	if rook_from >= 0:
 		var rook: TextureRect = _piece_nodes.get(rook_to)
 		if rook != null:
 			_place(rook, rook_from)
 			_tween.tween_property(rook, "position", square_rect(rook_to).position, MOVE_ANIM_TIME) \
-					.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+					.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	_tween.finished.connect(_on_animation_finished)
 
 
@@ -294,7 +314,9 @@ func _on_animation_finished() -> void:
 	for ghost in _ghosts:
 		ghost.queue_free()
 	_ghosts.clear()
-	_layout_pieces()
+	for node in _piece_nodes.values():
+		node.scale = Vector2.ONE
+	_layout_pieces()  # snap positions exactly; undoes any float drift from the tween
 	animation_finished.emit()
 
 

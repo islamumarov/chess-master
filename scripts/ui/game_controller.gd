@@ -206,8 +206,14 @@ func _next_turn() -> void:
 		return
 	if pos.side_to_move == human_color:
 		_legal_moves = pos.generate_legal_moves()
-		board.interactive = true
 		_update_status()
+		if board.is_animating():
+			# Keep input locked until the piece that just moved (ours or the AI's)
+			# finishes sliding into place.
+			await board.animation_finished
+			if game_over or pos.side_to_move != human_color:
+				return
+		board.interactive = true
 	else:
 		_start_ai()
 
@@ -263,7 +269,7 @@ func _show_game_over(title: String, subtitle: String) -> void:
 # ---------------------------------------------------------------------------
 
 func _on_square_clicked(sq: int) -> void:
-	if game_over or _ai_thinking or pos.side_to_move != human_color:
+	if game_over or _ai_thinking or pos.side_to_move != human_color or board.is_animating():
 		return
 	if _selected_sq >= 0 and sq != _selected_sq:
 		var candidates := PackedInt32Array()
@@ -335,13 +341,14 @@ func _play_move(move: int) -> void:
 	if flag == ChessMove.FLAG_CASTLE:
 		rook_from = to + 1 if to > from else to - 2
 		rook_to = to - 1 if to > from else to + 1
+	var promo_pawn_piece := pos.board[from] if ChessMove.promotion(move) != 0 else 0
 
 	var san := ChessNotation.to_san(pos, move)  # needs the pre-move position
 	pos.make_move(move)
 	_san_history.append(san)
 	_clear_selection()
 	board.set_last_move(from, to)
-	board.animate_move(from, to, captured_piece, captured_sq, rook_from, rook_to)
+	board.animate_move(from, to, captured_piece, captured_sq, rook_from, rook_to, promo_pawn_piece)
 	if pos.in_check():
 		_play_sound(sfx_check)
 	elif captured_piece != 0:
